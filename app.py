@@ -302,7 +302,7 @@ def calcular_metricas(df_periodo, carteras_pesos, inicial, mensual):
     return df_res, progresiones_nom, progresiones_real
 
 # MONTECARLO PARAMÉTRICO
-def calcular_montecarlo(df_periodo, carteras_pesos, horizonte, inicial, mensual, n_simul=10000):
+def calcular_montecarlo(df_periodo, carteras_pesos, horizonte, inicial, mensual, n_simul=1000):
     resultados = []
     mc_trayectorias_nom = {}
     mc_trayectorias_real = {}
