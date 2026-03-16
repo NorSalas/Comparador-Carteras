@@ -9,7 +9,7 @@ COLS_ACTIVOS = ["MSCI World", "EM (Emerg)", "Small Caps", "Oro",
                 "Bonos Corto", "Bonos Medio", "Bonos Largo", "REITs"]
 
 # ========================================
-# FUNCIONES BÁSICAS
+# FUNCIONES
 # ========================================
 def cagr(r):
     return np.prod(1 + r) ** (1 / len(r)) - 1 if len(r) > 0 else 0
@@ -177,9 +177,6 @@ def scatter_drawdown_recovery(df_hist_periodo, carteras_pesos):
 
     return pd.concat(filas, ignore_index=True)
 
-# ========================================
-# INTERÉS COMPUESTO
-# ========================================
 def simular_interes_compuesto(aporte_inicial, aporte_mensual, anos, interes_anual):
     n_meses = int(anos * 12)
     r_mensual = (1 + interes_anual) ** (1 / 12) - 1
@@ -262,9 +259,7 @@ def tabla_hitos_compuesto(df, hitos=None):
 
     return pd.DataFrame(filas)
 
-# ========================================
 # BACKTEST
-# ========================================
 def calcular_metricas(df_periodo, carteras_pesos, inicial, mensual):
     resultados = []
     progresiones_nom = {}
@@ -306,25 +301,7 @@ def calcular_metricas(df_periodo, carteras_pesos, inicial, mensual):
     df_res = pd.DataFrame(resultados).set_index("Cartera")
     return df_res, progresiones_nom, progresiones_real
 
-# ========================================
-# MONTECARLO VECTORIAL
-# ========================================
-def simular_progresion_mc(r_anual_mat, horizonte, inicial, mensual):
-    # r_anual_mat: shape (n_simul, horizonte)
-    n_simul, horizonte = r_anual_mat.shape
-    n_meses = horizonte * 12
-
-    r_mensual = (1 + r_anual_mat) ** (1 / 12) - 1       # (n_simul, horizonte)
-    r_mensual = np.repeat(r_mensual, 12, axis=1)        # (n_simul, n_meses)
-
-    valores = np.zeros((n_simul, n_meses + 1))
-    valores[:, 0] = inicial
-
-    for m in range(1, n_meses + 1):
-        valores[:, m] = valores[:, m - 1] * (1 + r_mensual[:, m - 1]) + mensual
-
-    return valores
-
+# MONTECARLO PARAMÉTRICO
 def calcular_montecarlo(df_periodo, carteras_pesos, horizonte, inicial, mensual, n_simul=10000):
     resultados = []
     mc_trayectorias_nom = {}
@@ -342,71 +319,57 @@ def calcular_montecarlo(df_periodo, carteras_pesos, horizonte, inicial, mensual,
         mu_c = float(medias_activos @ w)
         sigma_c = float(np.sqrt(w @ cov_activos @ w))
 
-        # Generar retornos anuales simulados de golpe
-        r_anual_sim = np.random.normal(mu_c, sigma_c, size=(n_simul, horizonte))
+        finales_nom = np.zeros(n_simul)
+        finales_real = np.zeros(n_simul)
+        cagr_sim_nom = np.zeros(n_simul)
+        cagr_sim_real = np.zeros(n_simul)
+        vol_sim = np.zeros(n_simul)
 
-        # Inflación constante media (vectorizada)
-        inflacion_sim = np.full((n_simul, horizonte), inflacion_media)
-        r_real_sim = rentabilidad_real(r_anual_sim, inflacion_sim)
+        trayectorias_nom = np.zeros((n_simul, horizonte + 1))
+        trayectorias_real = np.zeros((n_simul, horizonte + 1))
 
-        # Métricas de rentabilidad y riesgo (vectorizadas)
-        cagr_sim_nom = (np.prod(1 + r_anual_sim, axis=1) ** (1 / horizonte) - 1)
-        cagr_sim_real = (np.prod(1 + r_real_sim, axis=1) ** (1 / horizonte) - 1)
-        vol_sim = np.std(r_anual_sim, axis=1, ddof=1)
+        for i in range(n_simul):
+            r_anual_sim = np.random.normal(mu_c, sigma_c, size=horizonte)
+            inflacion_sim = np.full(horizonte, inflacion_media)
+            r_real_sim = rentabilidad_real(r_anual_sim, inflacion_sim)
 
-        # Simular progresión mensual y pasar a anual
-        curvas_nom = simular_progresion_mc(r_anual_sim, horizonte, inicial, mensual)  # (n_simul, n_meses+1)
-        n_meses = curvas_nom.shape[1] - 1
-        indices_anuales = np.linspace(0, n_meses, horizonte + 1).astype(int)
+            curva_nom = simular_progresion(r_anual_sim, horizonte, inicial, mensual)
+            curva_real = deflactar_curva(curva_nom, inflacion_sim)
 
-        curvas_anuales_nom = curvas_nom[:, indices_anuales]
+            indices_anuales = np.linspace(0, len(curva_nom) - 1, horizonte + 1).astype(int)
+            curva_anual_nom = curva_nom[indices_anuales]
+            curva_anual_real = curva_real[indices_anuales]
 
-        # Deflactar (usando inflacion_media aproximada)
-        inflacion_mensual = (1 + inflacion_media) ** (1 / 12) - 1
-        indice_precios = np.cumprod(np.ones(n_meses + 1) * (1 + inflacion_mensual))
-        curvas_reales = curvas_nom / indice_precios  # broadcasting
-        curvas_anuales_real = curvas_reales[:, indices_anuales]
+            finales_nom[i] = curva_anual_nom[-1]
+            finales_real[i] = curva_anual_real[-1]
+            cagr_sim_nom[i] = cagr(r_anual_sim)
+            cagr_sim_real[i] = cagr(r_real_sim)
+            vol_sim[i] = volatilidad(r_anual_sim)
 
-        finales_nom = curvas_anuales_nom[:, -1]
-        finales_real = curvas_anuales_real[:, -1]
+            trayectorias_nom[i, :] = curva_anual_nom / 1000.0
+            trayectorias_real[i, :] = curva_anual_real / 1000.0
 
         p5_nom, p50_nom, p95_nom = np.percentile(finales_nom / 1000, [5, 50, 95])
         p5_real, p50_real, p95_real = np.percentile(finales_real / 1000, [5, 50, 95])
 
-        # Percentiles por año para fan chart (en miles)
-        p5_path_nom = np.percentile(curvas_anuales_nom / 1000.0, 5, axis=0)
-        p50_path_nom = np.percentile(curvas_anuales_nom / 1000.0, 50, axis=0)
-        p95_path_nom = np.percentile(curvas_anuales_nom / 1000.0, 95, axis=0)
-
         resultados.append({
             "Cartera": nombre,
-            "CAGR": float(np.mean(cagr_sim_nom)),
-            "CAGR Real": float(np.mean(cagr_sim_real)),
-            "Vol": float(np.mean(vol_sim)),
-            "Sharpe": float(np.mean(cagr_sim_nom) / np.mean(vol_sim)) if np.mean(vol_sim) > 0 else 0,
+            "CAGR": np.mean(cagr_sim_nom),
+            "CAGR Real": np.mean(cagr_sim_real),
+            "Vol": np.mean(vol_sim),
+            "Sharpe": np.mean(cagr_sim_nom) / np.mean(vol_sim) if np.mean(vol_sim) > 0 else 0,
             "Ulcer": ulcer_index(r_activos @ w),
             "Recovery": max_recovery_years(r_activos @ w),
-            "P5% Nom": float(p5_nom),
-            "Mediana Nom": float(p50_nom),
-            "P95% Nom": float(p95_nom),
-            "P5% Real": float(p5_real),
-            "Mediana Real": float(p50_real),
-            "P95% Real": float(p95_real)
+            "P5% Nom": p5_nom,
+            "Mediana Nom": p50_nom,
+            "P95% Nom": p95_nom,
+            "P5% Real": p5_real,
+            "Mediana Real": p50_real,
+            "P95% Real": p95_real
         })
 
-        mc_trayectorias_nom[nombre] = {
-            "finales": finales_nom / 1000.0,
-            "p5": p5_path_nom,
-            "p50": p50_path_nom,
-            "p95": p95_path_nom
-        }
-
-        mc_trayectorias_real[nombre] = {
-            "finales": finales_real / 1000.0,
-            "p5": np.percentile(curvas_anuales_real / 1000.0, 5, axis=0),
-            "p50": np.percentile(curvas_anuales_real / 1000.0, 50, axis=0),
-            "p95": np.percentile(curvas_anuales_real / 1000.0, 95, axis=0)
-        }
+        mc_trayectorias_nom[nombre] = trayectorias_nom
+        mc_trayectorias_real[nombre] = trayectorias_real
 
     df_res = pd.DataFrame(resultados).set_index("Cartera")
     return df_res, mc_trayectorias_nom, mc_trayectorias_real
@@ -453,8 +416,7 @@ with col1:
     horizonte = st.slider("⏰ Horizonte (años)", 15, 40, 30)
     inicial = st.number_input("💰 Capital inicial", 5000, 50000, 10000, 1000)
     mensual = st.number_input("💸 Aportación mensual", 0, 2000, 300, 50)
-    # Cambiamos valor por defecto a 1000 simulaciones
-    n_simul = st.slider("🎲 Simulaciones", 1000, 25000, 1000, 1000)
+    n_simul = st.slider("🎲 Simulaciones", 1000, 25000, 10000, 1000)
     ventana_sens = st.selectbox("🗓️ Sensibilidad (años)", [5, 10, 15], index=1)
 
     st.markdown("---")
@@ -604,11 +566,11 @@ with col2:
     st.markdown(f"### 🎯 **MONTECARLO - {cartera_sel}**")
     col_graf1, col_graf2 = st.columns(2)
 
-    tray_info_nom = mc_trayectorias_nom[cartera_sel]
-    finales_sel = tray_info_nom["finales"]
+    tray_sel = mc_trayectorias_nom[cartera_sel]
     anos_mc = np.arange(0, horizonte + 1)
 
     with col_graf1:
+        finales_sel = tray_sel[:, -1]
         fig_hist, ax_hist = plt.subplots(figsize=(9, 5))
 
         p1, p5, p50, p95, p99 = np.percentile(finales_sel, [1, 5, 50, 95, 99])
@@ -634,9 +596,9 @@ with col2:
 
     with col_graf2:
         fig_fan, ax_fan = plt.subplots(figsize=(9, 5))
-        p5_path = tray_info_nom["p5"]
-        p50_path = tray_info_nom["p50"]
-        p95_path = tray_info_nom["p95"]
+        p5_path = np.percentile(tray_sel, 5, axis=0)
+        p50_path = np.percentile(tray_sel, 50, axis=0)
+        p95_path = np.percentile(tray_sel, 95, axis=0)
 
         ax_fan.fill_between(anos_mc, p5_path, p95_path, alpha=0.3,
                             color="skyblue", label="P5%-P95%")
@@ -732,14 +694,7 @@ with col2:
         st.info("No hay episodios suficientes para el scatter comparativo.")
 
     st.markdown(f"### 🔥 **Heatmap CAGR - {cartera_sel}**")
-    # Recorte a máximo 40 años para que no sea demasiado pesado
-    max_anos_heat = 40
-    if len(df_periodo_hist) > max_anos_heat:
-        df_periodo_heat = df_periodo_hist.iloc[-max_anos_heat:]
-    else:
-        df_periodo_heat = df_periodo_hist
-
-    anos_heat, mat_heat = heatmap_cagr(df_periodo_heat, pesos_sel)
+    anos_heat, mat_heat = heatmap_cagr(df_periodo_hist, pesos_sel)
 
     fig_hm, ax_hm = plt.subplots(figsize=(10, 8))
     im = ax_hm.imshow(mat_heat * 100, cmap="RdYlGn", aspect="auto", origin="upper")
